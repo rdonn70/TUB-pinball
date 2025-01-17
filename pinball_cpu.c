@@ -10,6 +10,7 @@ by Ryan Donnellan
 #include <string.h>
 #include <unistd.h>
 #include <time.h>
+#include <pthread.h>
 #include <termios.h>
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_main.h>
@@ -27,11 +28,18 @@ int highscore = 0;
 int score = 0;
 int volume = 128; //Volume is a value defined to be between 0 and 128 based on MIX_MAX_VOLUME in SDL3_mixer.
 
-char coin_door_port[] = "";
-char led_driver_port[] = "";
-char score_driver_port[] = "";
-struct termios tty;
+char coin_door_port[128] = "";
+char led_driver_port[128] = "";
+char score_driver_port[128] = "";
 
+// debug_mode, start_button_pressed, deposited_money, score, and volume are mutexed 
+pthread_mutex_t debug_mutex = PTHREAD_MUTEX_INITIALIZER;
+pthread_mutex_t start_mutex = PTHREAD_MUTEX_INITIALIZER;
+pthread_mutex_t deposited_mutex = PTHREAD_MUTEX_INITIALIZER;
+pthread_mutex_t score_mutex = PTHREAD_MUTEX_INITIALIZER;
+pthread_mutex_t volume_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+struct termios tty;
 struct RGBLedMatrixOptions options;
 struct RGBLedMatrix *matrix;
 struct LedFont *font;
@@ -94,7 +102,9 @@ void stop_all_sound() {
 
 // set_volume(): Takes desired channel (0 = music, 1 = voice, 2/3 = sound effects, -1 = ALL CHANNELS), and the desired volume (an integer from 0 to 128) where 0 is muted and 128 is loudest.
 void set_volume(int desired_channel, int volume) {
+	pthread_mutex_lock(&volume_mutex);
 	Mix_Volume(desired_channel, volume);
+	pthread_mutex_unlock(&volume_mutex);
 }
 
 // load_highscore(): Reads the highscore.txt file to get the current highscore on startup. The highscore is updated on the file when a game ends with a new highscore.
@@ -338,6 +348,7 @@ void waiting_for_money_display(double display_time, uint8_t color_r, uint8_t col
 	led_canvas_clear(canvas);
 	led_canvas_clear(offscreen);
 	
+	pthread_mutex_lock(&deposited_mutex);
     if (price == 0) {
         text1 = "FREE PLAY!";
     } else if (deposited_money == 0) {
@@ -350,6 +361,7 @@ void waiting_for_money_display(double display_time, uint8_t color_r, uint8_t col
     } else {
         snprintf(text2, sizeof(text1), "PRICE: %.2f", price);
     }
+	pthread_mutex_unlock(&deposited_mutex);
 	
 	int length_text1 = strlen(text1);
 	int length_text2 = strlen(text2);
@@ -434,12 +446,12 @@ void thanks_text(uint8_t color_r, uint8_t color_g, uint8_t color_b) {
 	const char* text3_2 = "THANKS";
 	const char* text4_1 = "FELICIA";
 	const char* text4_2 = "LAI";
-	const char* text5_1 = "DEON";
-	const char* text5_2 = "RIVERS";
-	const char* text6_1 = "ALEXA";
-	const char* text6_2 = "SCHUSTER"; 
-	const char* text7_1 = "SOFIA";
-	const char* text7_2 = "SHERMAN";
+	const char* text5_1 = "PAUL";
+	const char* text5_2 = "NIEVES";
+	const char* text6_1 = "DEON";
+	const char* text6_2 = "RIVERS";
+	const char* text7_1 = "ALEXA";
+	const char* text7_2 = "SCHUSTER"; 
 	const char* text8_1 = "RHEA";
 	const char* text8_2 = "VURGHESE";
 	const char* text9_1 = "KYLE";
@@ -535,7 +547,9 @@ void idle_loop() {
     
     while(1) {
         play_music("/home/pinball/Desktop/Pinball/pinball_sounds/Air.ogg", -1)
-        if (deposited_money == 0 and price != 0) {
+        pthread_mutex_lock(&deposited_mutex);
+		if (deposited_money == 0 and price != 0) {
+			pthread_mutex_unlock(&deposited_mutex);
             dvd_text_effect("INSERT COINS", 15, 0, 0, 255);
 			play_sound("/home/pinball/Desktop/Pinball/pinball_sounds/Anthem.wav", 0, -1);
             gif_display("/home/pinball/Desktop/Pinball/startup/", 18, 1);
@@ -549,6 +563,7 @@ void idle_loop() {
             stop_sound(0, 1000);
             sleep(1);
         } else if (deposited_money > 0 and price != 0) {
+			pthread_mutex_unlock(&deposited_mutex);
             while(deposited_money > 0) {
                 waiting_for_money_display(20, 255, 0, 0);
                 sleep(1);
@@ -558,9 +573,11 @@ void idle_loop() {
             stop_sound(0, 1000);
             sleep(1);
 		}
+		pthread_mutex_lock(&deposited_mutex);
         if (deposited_money >= price or price == 0) {
             if (start_button_pressed == 1) {
                 deposited_money = deposited_money - price;
+				pthread_mutex_unlock(&deposited_mutex);
                 start_button_pressed = 0;
                 main_game();
 			}
@@ -568,9 +585,82 @@ void idle_loop() {
 	}
 }
 
+void* coindoor_thread(const char* port) {
+    char read_buffer[9];
+	int cd_text_read = 0;
+	
+	tcgetattr(port, &tty);
+
+	// Configuring USB port - if this doesnt work im going to shoot myself
+	tty.c_cflag &= ~PARENB;
+	tty.c_cflag &= ~CSTOPB;
+	tty.c_cflag |= CS8;
+	tty.c_cflag &= ~CRTSCTS;
+	tty.c_cflag |= CREAD | CLOCAL;
+	tty.c_lflag &= ~ICANON;
+	tty.c_lflag &= ~ECHO;
+	tty.c_lflag &= ~ECHOE;
+	tty.c_lflag &= ~ECHONL;
+	tty.c_lflag &= ~ISIG;
+	tty.c_iflag &= ~(IXON | IXOFF | IXANY);
+	tty.c_iflag &= ~(IGNBRK|BRKINT|PARMRK|ISTRIP|INLCR|IGNCR|ICRNL);
+	tty.c_oflag &= ~OPOST;
+	tty.c_oflag &= ~ONLCR;
+	cfsetispeed(&tty, B9600);
+	cfsetospeed(&tty, B9600);
+
+	tcsetattr(port, TCSANOW, &tty);
+	while (cd_text_read < 9) {
+		cd_text_read += read(port, &read_buffer, sizeof(read_buffer)); //reads initial "COIN_DOOR" text.
+	}
+    while(1) {
+		char read_data[4];
+		int credit = 0;
+		int volume_up = 0;
+		int volume_down = 0;
+		int debug = 0;
+		int read_bytes = 0;
+		while (read_bytes < 4) {
+			read_bytes += read(port, &read_data, sizeof(read_data)); //reads actual data coming in.
+		}
+		credit = atoi(read_data[0]);
+		volume_up = atoi(read_data[1]);
+		volume_down = atoi(read_data[2]);
+		debug = atoi(read_data[3]);
+		
+		if (credit == 1) {
+			pthread_mutex_lock(&deposited_mutex);
+            deposited_money += 0.25;
+			pthread_mutex_unlock(&deposited_mutex);
+		}
+		if(volume_down == 1) {
+			pthread_mutex_lock(&volume_mutex);
+			if (volume > 0) {
+				volume -= 2;
+				Mix_Volume(-1, volume);
+			}
+			pthread_mutex_unlock(&volume_mutex);
+		}
+		if(volume_up == 1) {
+			pthread_mutex_lock(&volume_mutex);
+			if (volume < 128) {
+				volume += 2;
+				Mix_Volume(-1, volume);
+			}
+			pthread_mutex_unlock(&volume_mutex);
+		}
+		if(debug == 1) {
+			pthread_mutex_lock(&debug_mutex);
+			debug_mode = 1;
+			pthread_mutex_unlock(&debug_mutex);
+		}
+	}
+}
+
 // MAIN CODE START.
 int main(int argc, char **argv) {
     SDL_AudioSpec spec;
+	pthread_t thread1;
 	
 	SDL_Init(SDL_INIT_AUDIO | SDL_INIT_VIDEO);
     Mix_OpenAudio(44100, MIX_DEFAULT_FORMAT, MIX_DEFAULT_CHANNELS, 1024);
@@ -586,23 +676,23 @@ int main(int argc, char **argv) {
 	check_usb_port("/dev/ttyUSB3");
 
     sleep(1);
-
-	// TO DO: ADD THREAD FOR READING FROM COIN DOOR.
-    //stop_event.clear()
-    //bg_thread1 = threading.Thread(target=coindoor, args=(coin_door_port,))
-    //bg_thread1.start()
-    
-	gif_display_music("/home/pinball/Desktop/Pinball/startup/", 18, 0, "startup.wav");
+    pthread_create(&thread1, NULL, coindoor_thread, NULL);
+    sleep(1);
+	
+	gif_display_music("/home/pinball/Desktop/Pinball/startup/", 18, 0, "startup.wav"); // need to replace 18 with the correct frame count
     gif_display_music("/home/pinball/Desktop/Pinball/forge_splash/", 12, 0, "forge_splash.wav"); //need to replace 12 with correct frame count
     play_sound("/home/pinball/Desktop/Pinball/pinball_sounds/Fixer.wav", 0, -1);
     thanks_text(255, 0, 0);
     stop_sound(0, 2000);
     
+	pthread_mutex_lock(&debug_mutex);
     if (debug_mode == 1) {
 		// TO DO: ADD DEBUG STUFF
         debug_mode = 0;
+		pthread_mutex_unlock(&debug_mutex);
         end_game();
 	} else {
+		pthread_mutex_unlock(&debug_mutex);
         idle_loop();
 	}
 }
