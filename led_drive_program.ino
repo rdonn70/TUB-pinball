@@ -32,7 +32,7 @@ void loop() {
 
     digitalWrite(5, LOW);
     for(int i = 0; i < 12; i++) {
-      shiftOut(6, 4, LSBFIRST, led_code);
+      shiftOut(6, 4, LSBFIRST, led_code[i]);
     }
     digitalWrite(5, HIGH);
   }
