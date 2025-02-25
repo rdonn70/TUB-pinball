@@ -2,12 +2,14 @@
 LED Driver Code
 
 Hardware: 12 daisy chained 8 bit shift registers
-Software: Takes in 13 bytes of serial data, outputs byte 0 to LED power control and bytes 1-13 of data to the LEDs. There are 32 LEDs available to call, each LED has R, G, B LEDs for a total of 96 addressable LEDs.
+Software: Takes in 13 bytes of serial data, outputs byte 1 to LED power control and bytes 2-13 of data to the LEDs. There are 32 LEDs available to call, each LED has R, G, B LEDs for a total of 96 addressable LEDs.
 
 */
 
 char serial_data = 0; // char for storing read serial data.
-uint8_t led_code[12]; // array to hold 1 byte chunks of data * 12 shift registers = (96 LEDs [R, G, B])
+uint8_t breathing_effect = 0;
+bool breathing_direction = true; // true = up, false = down
+byte led_code[13]; // array to hold 1 byte chunks of data * 12 shift registers + 1 byte for power FET control
 
 void setup() {
   pinMode(5, OUTPUT); //PD5 - register clock pin (latch)
@@ -26,13 +28,7 @@ void setup() {
 
 void loop() { 
   if(Serial.available() >= 13) {
-    serial_data = Serial.read();
-    led_code[0] = serial_data - '0'; // First byte of the 13 bytes controls the LED brightness (PWM)
-
-    for(int i = 1; i < 12; i++) {
-      serial_data = Serial.read();
-      led_code[i] = serial_data - '0';
-    }
+    Serial.readBytes(led_code, 13);
 
     digitalWrite(5, LOW);
     for(int i = 1; i < 13; i++) {
@@ -40,26 +36,30 @@ void loop() {
     }
     digitalWrite(5, HIGH);
     
-    if(led_code[0] == 1) {
-      analogWrite(9, 25);
-    } else if(led_code[0] == 2) {
-      analogWrite(9, 50);
-    } else if(led_code[0] == 3) {
-      analogWrite(9, 75);
-    } else if(led_code[0] == 4) {
-      analogWrite(9, 100);
-    } else if(led_code[0] == 5) {
-      analogWrite(9, 125);
-    } else if(led_code[0] == 6) {
-      analogWrite(9, 150);
-    } else if(led_code[0] == 7) {
-      analogWrite(9, 175);
-    } else if(led_code[0] == 8) {
-      analogWrite(9, 200);
-    } else if(led_code[0] == 9) {
-      analogWrite(9, 250);
+    if(led_code[0] == 0b11111111) {
+      while(1) {
+        if(Serial.available() > 0) {
+          analogWrite(9, 0);
+          break;
+        }
+
+        analogWrite(9, breathing_effect);
+
+        if(breathing_effect > 250) {
+          breathing_direction = false; 
+        } else if(breathing_effect <= 0) {
+          breathing_direction = true;
+        }
+        if(breathing_direction == true) {
+          breathing_effect += 1;
+          delay(25);
+        } else {
+          breathing_effect -= 1;
+          delay(25);
+        }
+      }
     } else {
-      analogWrite(9, 0);
+      analogWrite(9, led_code[0]);
     }
   }
 }
