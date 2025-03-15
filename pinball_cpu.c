@@ -4,9 +4,11 @@ by Ryan Donnellan
 
 "I have the blueprint to the catacombs." - Dracula, 2024
 
+g++ pinball_cpu.c -o pinball_cpu -pthread -lSDL3 -lSDL3_image -lSDL3_mixer -L/home/pinball/rpi-rgb-led-matrix/lib -lrgbmatrix -lm -lwiringPi
 */
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 #include <time.h>
@@ -14,11 +16,16 @@ by Ryan Donnellan
 #include <termios.h>
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_main.h>
-#include <SDL3/SDL_image.h>
+#include <SDL3_image/SDL_image.h>
 #include <SDL3_mixer/SDL_mixer.h>
-#include "led-matrix-c.h"
+#include "wiringSerial.h"
+#include "/home/pinball/rpi-rgb-led-matrix/include/led-matrix-c.h"
 
 #define NUM_CHANNELS 4 // Channel 1: Music | Channel 2: Voice Over | Channel 3: Sound Effect 1 | Channel 4: Sound Effect 2.
+
+void end_game(void);
+void idle_loop(void);
+void main_game(void);
 
 bool debug_mode = 0;
 bool start_button_pressed = 0;
@@ -31,6 +38,7 @@ int volume = 128; //Volume is a value defined to be between 0 and 128 based on M
 char coin_door_port[128] = "";
 char led_driver_port[128] = "";
 char score_driver_port[128] = "";
+char *highscore_string;
 
 // debug_mode, start_button_pressed, deposited_money, score, and volume are mutexed 
 pthread_mutex_t debug_mutex = PTHREAD_MUTEX_INITIALIZER;
@@ -41,52 +49,57 @@ pthread_mutex_t volume_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 struct termios tty;
 struct RGBLedMatrixOptions options;
+struct RGBLedRuntimeOptions runtime_options;
 struct RGBLedMatrix *matrix;
 struct LedFont *font;
 struct LedCanvas *canvas;
 struct LedCanvas *offscreen;
 
-static Mix_Music *music = NULL;
-Mix_Chunk *music_channel;
-Mix_Chunk *voice_channel;
-Mix_Chunk *sound1_channel;
-Mix_Chunk *sound2_channel;
+struct SDL_PixelFormatDetails *format_details;
+
+SDL_AudioSpec spec;
+
+Mix_Chunk *music_channel = NULL;
+Mix_Chunk *voice_channel = NULL;
+Mix_Chunk *sound1_channel = NULL;
+Mix_Chunk *sound2_channel = NULL;
 
 // matrix_init(): initializes the RGB matrix display.
 void matrix_init() {
 	memset(&options, 0, sizeof(options));
+	memset(&runtime_options, 0, sizeof(runtime_options));
 	options.rows = 32;
 	options.cols = 64;
 	options.chain_length = 1;
 	options.parallel = 1;
-	options.gpio_slowdown = 3;
-	options.daemon = 1;
-	options.drop_privileges = 1;
-	options.hardware_mapping = 'adafruit-hat';
+	runtime_options.gpio_slowdown = 3;
+	runtime_options.daemon = 1;
+	runtime_options.drop_privileges = 1;
+	options.hardware_mapping = "adafruit-hat";
 
-	matrix = led_matrix_create_from_options(&options);
+	matrix = led_matrix_create_from_options_and_rt_options(&options, &runtime_options);
 	canvas = led_matrix_get_canvas(matrix);
 	offscreen = led_matrix_create_offscreen_canvas(matrix);
 }
 
 // play_sound(): Takes a file path, the desired channel (0 = music, 1 = voice, 2/3 = sound effects), and desired loop count (-1 = infinite). Plays the sound.
-void play_sound(const char sound_dir, int desired_channel, int loop_count) {
+void play_sound(const char *sound_dir, int desired_channel, int loop_count) {
 	if (desired_channel == 0) {
 		Mix_FreeChunk(music_channel);
 		music_channel = Mix_LoadWAV(sound_dir);
-		Mix_PlayChannel(0, chunk, loop_count);
+		Mix_PlayChannel(0, music_channel, loop_count);
 	} else if (desired_channel == 1) {
 		Mix_FreeChunk(voice_channel);
 		voice_channel = Mix_LoadWAV(sound_dir);
-		Mix_PlayChannel(1, chunk, loop_count); 
+		Mix_PlayChannel(1, voice_channel, loop_count); 
 	} else if (desired_channel == 2) {
 		Mix_FreeChunk(sound1_channel);
 		sound1_channel = Mix_LoadWAV(sound_dir);
-		Mix_PlayChannel(2, chunk, loop_count);
+		Mix_PlayChannel(2, sound1_channel, loop_count);
 	} else {
 		Mix_FreeChunk(sound2_channel);
 		sound2_channel = Mix_LoadWAV(sound_dir);
-		Mix_PlayChannel(3, chunk, loop_count);
+		Mix_PlayChannel(3, sound2_channel, loop_count);
 	}
 }
 
@@ -119,43 +132,25 @@ void load_highscore() {
 }
 
 // check_usb_port(): Takes a port to read, and sees if that port is one of the desired peripheral boards (coin door, led driver, or score driver).
-void check_usb_port(char *port) {
+void check_usb_port(const char *port) {
+	int i;
+	int fd = serialOpen(port, 9600);
+	char read_buffer[9];
 	
-	tcgetattr(port, &tty);
-
-	// Configuring USBs - if this doesnt work im going to shoot myself
-	tty.c_cflag &= ~PARENB;
-	tty.c_cflag &= ~CSTOPB;
-	tty.c_cflag |= CS8;
-	tty.c_cflag &= ~CRTSCTS;
-	tty.c_cflag |= CREAD | CLOCAL;
-	tty.c_lflag &= ~ICANON;
-	tty.c_lflag &= ~ECHO;
-	tty.c_lflag &= ~ECHOE;
-	tty.c_lflag &= ~ECHONL;
-	tty.c_lflag &= ~ISIG;
-	tty.c_iflag &= ~(IXON | IXOFF | IXANY);
-	tty.c_iflag &= ~(IGNBRK|BRKINT|PARMRK|ISTRIP|INLCR|IGNCR|ICRNL);
-	tty.c_oflag &= ~OPOST;
-	tty.c_oflag &= ~ONLCR;
-	cfsetispeed(&tty, B9600);
-	cfsetospeed(&tty, B9600);
-
-	tcsetattr(port, TCSANOW, &tty);
-	
-	char read_buffer [9];
-	int num_bytes = read(port, &read_buffer, sizeof(read_buffer));
+	for (i = 0; i < 9; i++) {
+		read_buffer[i] = serialGetchar(fd);
+	}
 
     if (strcmp(read_buffer, "COIN_DOOR") == 0) {
         strcpy(coin_door_port, port);
     }else if (strcmp(read_buffer, "LED_DRIVE") == 0) {
         strcpy(led_driver_port, port);
     }else if (strcmp(read_buffer, "SCOR_DRIV") == 0) {
-        strcpy(score_driver_port,port);
+        strcpy(score_driver_port, port);
 	}
     usleep(100000);
-	memset(&read_buf, '\0', sizeof(read_buf));
-	close(port);
+	memset(&read_buffer, '\0', sizeof(read_buffer));
+	serialClose(fd);
 }
 
 // gif_display(): Standard version of display a gif. Takes in the gif_directory (folder of frames), the frame_count (number of frames in folder), and the loop_count.
@@ -174,12 +169,12 @@ void gif_display(const char* gif_directory, int frame_count, int loop_count) {
 			snprintf(file_name, sizeof(file_name), "%s/%d.png", gif_directory, frame_index);
             SDL_Surface *surface = IMG_Load(file_name);
 			
-			int buffer_index = 0;
+	    int buffer_index = 0;
             for (int y = 0; y < height; y++) {
 				for (int x = 0; x < width; x++) {
 					uint32_t pixel = ((uint32_t*)surface->pixels)[y * width + x];
 					uint8_t r, g, b;
-					SDL_GetRGB(pixel, surface->format, &r, &g, &b);
+					SDL_GetRGB(pixel, format_details, NULL, &r, &g, &b);
 					image_buffer[buffer_index++] = r;
 					image_buffer[buffer_index++] = g;
 					image_buffer[buffer_index++] = b;
@@ -188,15 +183,15 @@ void gif_display(const char* gif_directory, int frame_count, int loop_count) {
             set_image(offscreen, 0, 0, image_buffer, 6144, 64, 32, 0); //canvas, x offset, y offset, image_buffer, bytes in image buffer, image width, image height, BGR=0 (makes it interpreted as RGB).
             offscreen = led_matrix_swap_on_vsync(matrix, offscreen);
         playback_count++;
+	SDL_DestroySurface(surface);
 		}
 	}
 	led_canvas_clear(canvas);
 	led_canvas_clear(offscreen);
-	SDL_FreeSurface(surface);
 }
 
 // gif_display_music(): gif_display() but with music. Takes in the gif_directory (folder of frames), the frame_count (number of frames in folder), the loop_count and the music_dir.
-void gif_display_music(const char gif_directory, int frame_count, int loop_count, const char music_dir) {
+void gif_display_music(const char* gif_directory, int frame_count, int loop_count, const char* music_dir) {
     char file_name[256];
 	uint8_t image_buffer[6144]; // 3(RGB) * image width(64) * image height(32) = 6144
 	int playback_count = 0;
@@ -206,8 +201,8 @@ void gif_display_music(const char gif_directory, int frame_count, int loop_count
 	
 	Mix_HaltChannel(0);
 	Mix_FreeChunk(music_channel);
-	music_channel = Mix_LoadWAV(sound_dir);
-	Mix_PlayChannel(0, chunk, loop_count);
+	music_channel = Mix_LoadWAV(music_dir);
+	Mix_PlayChannel(0, music_channel, loop_count);
 	
     led_canvas_clear(canvas);
     
@@ -221,7 +216,7 @@ void gif_display_music(const char gif_directory, int frame_count, int loop_count
 				for (int x = 0; x < width; x++) {
 					uint32_t pixel = ((uint32_t*)surface->pixels)[y * width + x];
 					uint8_t r, g, b;
-					SDL_GetRGB(pixel, surface->format, &r, &g, &b);
+					SDL_GetRGB(pixel, format_details, NULL, &r, &g, &b);
 					image_buffer[buffer_index++] = r;
 					image_buffer[buffer_index++] = g;
 					image_buffer[buffer_index++] = b;
@@ -230,24 +225,24 @@ void gif_display_music(const char gif_directory, int frame_count, int loop_count
             set_image(offscreen, 0, 0, image_buffer, 6144, 64, 32, 0); //canvas, x offset, y offset, image_buffer, bytes in image buffer, image width, image height, BGR=0 (makes it interpreted as RGB).
             offscreen = led_matrix_swap_on_vsync(matrix, offscreen);
         playback_count++;
+	SDL_DestroySurface(surface);
 		}
 	}
 	Mix_HaltChannel(0);
 	led_canvas_clear(canvas);
 	led_canvas_clear(offscreen);
-	SDL_FreeSurface(surface);
 }
 
 //highscore_display(): Displays the current machine highscore. Takes the time the screen will display for (display_time).
 void highscore_display(double display_time) {
 	clock_t start, end;
 	double time_used;
-
-	char highscore_string;
-
+	
+	highscore_string = (char *)malloc(10 * sizeof(char));
+	
 	uint8_t color_r = 255;
 	uint8_t color_g = 0;
-	uint8_t color b = 0;
+	uint8_t color_b = 0;
     
 	sprintf(highscore_string, "%09d", highscore);
 	
@@ -266,7 +261,7 @@ void highscore_display(double display_time) {
         end = clock();
 		time_used = ((double) (end - start)) / CLOCKS_PER_SEC; // in seconds
         if(time_used >= display_time) {
-            break
+            break;
         } else if (time_used >= 1) {
             if(color_g <= 200) {
                 color_g += 4;
@@ -280,16 +275,14 @@ void highscore_display(double display_time) {
 }
 
 // score_display(): Displays score. Takes the length of time to display, and the rgb of the text.
-void score_display(double display_time, uint8_t color_r, uint8_t, color_g, uint8_t color_b) {
+void score_display(char* score_string, double display_time, uint8_t color_r, uint8_t color_g, uint8_t color_b) {
     clock_t start, end;
 	double time_used;
-	
-	char highscore_string;
 	
 	led_canvas_clear(canvas);
 	led_canvas_clear(offscreen);
 	
-    start = time.time()
+    start = clock();
     while(1) {
 		sprintf(score_string, "%09d", score);
 		// to determine x coordinate: 64 = (2*x) + (6 * number of characters)... (where x = start of text).
@@ -302,7 +295,7 @@ void score_display(double display_time, uint8_t color_r, uint8_t, color_g, uint8
 		time_used = ((double) (end - start)) / CLOCKS_PER_SEC; // in seconds
 		
         if (time_used >= display_time) {
-            break
+            break;
 		}
 	}
 }
@@ -333,7 +326,7 @@ void two_row_text(const char* text1, const char* text2, double display_time, uin
 		time_used = ((double) (end - start)) / CLOCKS_PER_SEC; // in seconds
 		
         if (time_used >= display_time) {
-            break
+            break;
 		}
 	}
 }
@@ -342,22 +335,22 @@ void two_row_text(const char* text1, const char* text2, double display_time, uin
 void waiting_for_money_display(double display_time, uint8_t color_r, uint8_t color_g, uint8_t color_b) {
     clock_t start, end;
 	double time_used;
-	char[128] text1;
-	char[128] text2;
+	char text1[128];
+	char text2[128];
 	
 	led_canvas_clear(canvas);
 	led_canvas_clear(offscreen);
 	
 	pthread_mutex_lock(&deposited_mutex);
     if (price == 0) {
-        text1 = "FREE PLAY!";
+        strcpy(text1, "FREE PLAY!");
     } else if (deposited_money == 0) {
-        text1 = "INSERT COINS";
+        strcpy(text1, "INSERT COINS");
     } else {
 		snprintf(text1, sizeof(text1), "CREDIT: %.2f", deposited_money);
     }
 	if (deposited_money >= price) {
-        text2 = "PRESS START!";
+        strcpy(text2, "PRESS START!");
     } else {
         snprintf(text2, sizeof(text1), "PRICE: %.2f", price);
     }
@@ -381,7 +374,7 @@ void waiting_for_money_display(double display_time, uint8_t color_r, uint8_t col
 		time_used = ((double) (end - start)) / CLOCKS_PER_SEC; // in seconds
 		
         if (time_used >= display_time) {
-            break
+            break;
 		}
 	}
 }
@@ -409,14 +402,14 @@ void dvd_text_effect(const char* text, double display_time, uint8_t color_r, uin
         draw_text(offscreen, font, 14, 7, color_r, color_g, color_b, "SCORE:", 0);
         offscreen = led_matrix_swap_on_vsync(matrix, offscreen);
 
-        if (((y + text_height) >= screen_height) or (y <= 0) {
+        if (((y + text_height) >= screen_height) || (y <= 0)) {
             dirY = dirY * (-1);
 			srand(time(NULL));
             color_r = ((rand() + 50) % 255);
 			color_g = ((rand() + 50) % 255);
 			color_b = ((rand() + 50) % 255);
 		}
-        if (((x + text_width) >= screen_width) or (x <= 0)) {
+        if (((x + text_width) >= screen_width) || (x <= 0)) {
             dirX = dirX * (-1);
 			srand(time(NULL));
             color_r = ((rand() + 50) % 255);
@@ -430,7 +423,7 @@ void dvd_text_effect(const char* text, double display_time, uint8_t color_r, uin
         end = clock();
 		time_used = ((double) (end - start)) / CLOCKS_PER_SEC; // in seconds
         if (time_used >= display_time) {
-            break
+            break;
 		}
 	}
 }
@@ -466,32 +459,32 @@ void thanks_text(uint8_t color_r, uint8_t color_g, uint8_t color_b) {
     for (i = 0; i < 8; i++) { //9 entries for the text, so i < 8
         int pos = 37; // height + 5 pixels?
 		if (i == 0) {
-			text1 = text1_1;
-			text2 = text1_2;
+			strcpy(text1, text1_1);
+			strcpy(text2, text1_2);
 		} else if (i == 1) {
-			text1 = text2_1;
-			text2 = text2_2;
+			strcpy(text1, text2_1);
+			strcpy(text2, text2_2);
 		} else if (i == 2) {
-			text1 = text3_1;
-			text2 = text3_2;
+			strcpy(text1, text3_1);
+			strcpy(text2, text3_2);
 		} else if (i == 3) {
-			text1 = text4_1;
-			text2 = text4_2;
+			strcpy(text1, text4_1);
+			strcpy(text2, text4_2);
 		} else if (i == 4) {
-			text1 = text5_1;
-			text2 = text5_2;
+			strcpy(text1, text5_1);
+			strcpy(text2, text5_2);
 		} else if (i == 5) {
-			text1 = text6_1;
-			text2 = text6_2;
+			strcpy(text1, text6_1);
+			strcpy(text2, text6_2);
 		} else if (i == 6) {
-			text1 = text7_1;
-			text2 = text7_2;
+			strcpy(text1, text7_1);
+			strcpy(text2, text7_2);
 		} else if (i == 7) {
-			text1 = text8_1;
-			text2 = text8_2;
+			strcpy(text1, text8_1);
+			strcpy(text2, text8_2);
 		} else {
-			text1 = text9_1;
-			text2 = text9_2;
+			strcpy(text1, text9_1);
+			strcpy(text2, text9_2);
 		}
 
         for (ii = 0; ii < 37; ii++) { // for x in range screen_height + 5
@@ -508,15 +501,47 @@ void thanks_text(uint8_t color_r, uint8_t color_g, uint8_t color_b) {
 	}
 }
 
-//WIP!!
-// main_game(): Gameplay loop that handles displaying animations, playing sounds, and reading and manipulating sensor data while someone is playing the game.
-void main_game() {
-    int lives = 3;
+// idle_loop(): Attract mode. Cycles through sounds, coins inserted, highscore, animations, etc.
+void idle_loop() {
+    stop_all_sound();
     
-    //gameplay logic
-    
-    if(lives == 0) {
-        end_game();
+    while(1) {
+        play_sound("/home/pinball/Desktop/Pinball/pinball_sounds/Air.ogg", 0, -1);
+        pthread_mutex_lock(&deposited_mutex);
+		if (deposited_money == 0 && price != 0) {
+			pthread_mutex_unlock(&deposited_mutex);
+            dvd_text_effect("INSERT COINS", 15, 0, 0, 255);
+			play_sound("/home/pinball/Desktop/Pinball/pinball_sounds/Anthem.wav", 0, -1);
+            gif_display("/home/pinball/Desktop/Pinball/startup/", 18, 1);
+            sleep(1);
+            stop_sound(0, 2000);
+            sleep(2);
+            play_sound("/home/pinball/Desktop/Pinball/pinball_sounds/Fixer.wav", 0, -1);
+            waiting_for_money_display(20, 255, 0, 0);
+            sleep(1);
+            //gif_display(random.choice(game_gifs_list), random.randint(2, 5), 12) <- need to figure out a way to do this in C...
+            stop_sound(0, 1000);
+            sleep(1);
+        } else if (deposited_money > 0 && price != 0) {
+			pthread_mutex_unlock(&deposited_mutex);
+            while(deposited_money > 0) {
+                waiting_for_money_display(20, 255, 0, 0);
+                sleep(1);
+                gif_display("/home/pinball/Desktop/Pinball/startup/", 18, 1);
+                sleep(1);
+			}
+            stop_sound(0, 1000);
+            sleep(1);
+		}
+		pthread_mutex_lock(&deposited_mutex);
+        if (deposited_money >= price || price == 0) {
+            if (start_button_pressed == 1) {
+                deposited_money = deposited_money - price;
+				pthread_mutex_unlock(&deposited_mutex);
+                start_button_pressed = 0;
+                main_game();
+			}
+		}
 	}
 }
 
@@ -524,7 +549,7 @@ void main_game() {
 void end_game() {
     stop_all_sound();
     play_sound("/home/pinball/Desktop/Pinball/pinball_sounds/Air.wav", 0, -1);
-    score_display(5, 255, 0, 0);
+    //score_display(score, 5, 255, 0, 0);
 
     if (score > highscore) {
 		// const char* text1, const char* text2, double display_time, uint8_t color_r, uint8_t color_g, uint8_t color_b
@@ -541,92 +566,44 @@ void end_game() {
     idle_loop();
 }
 
-// idle_loop(): Attract mode. Cycles through sounds, coins inserted, highscore, animations, etc.
-void idle_loop() {
-    stop_all_sound();
+//WIP!!
+// main_game(): Gameplay loop that handles displaying animations, playing sounds, and reading and manipulating sensor data while someone is playing the game.
+void main_game() {
+    int lives = 3;
     
-    while(1) {
-        play_music("/home/pinball/Desktop/Pinball/pinball_sounds/Air.ogg", -1)
-        pthread_mutex_lock(&deposited_mutex);
-		if (deposited_money == 0 and price != 0) {
-			pthread_mutex_unlock(&deposited_mutex);
-            dvd_text_effect("INSERT COINS", 15, 0, 0, 255);
-			play_sound("/home/pinball/Desktop/Pinball/pinball_sounds/Anthem.wav", 0, -1);
-            gif_display("/home/pinball/Desktop/Pinball/startup/", 18, 1);
-            sleep(1);
-            stop_sound(0, 2000);
-            sleep(2);
-            play_sound("/home/pinball/Desktop/Pinball/pinball_sounds/Fixer.wav", 0, -1);
-            waiting_for_money_display(20, 255, 0, 0);
-            sleep(1);
-            //gif_display(random.choice(game_gifs_list), random.randint(2, 5), 12) <- need to figure out a way to do this in C...
-            stop_sound(0, 1000);
-            sleep(1);
-        } else if (deposited_money > 0 and price != 0) {
-			pthread_mutex_unlock(&deposited_mutex);
-            while(deposited_money > 0) {
-                waiting_for_money_display(20, 255, 0, 0);
-                sleep(1);
-                gif_display("/home/pinball/Desktop/Pinball/startup/", 18, 1);
-                sleep(1);
-			}
-            stop_sound(0, 1000);
-            sleep(1);
-		}
-		pthread_mutex_lock(&deposited_mutex);
-        if (deposited_money >= price or price == 0) {
-            if (start_button_pressed == 1) {
-                deposited_money = deposited_money - price;
-				pthread_mutex_unlock(&deposited_mutex);
-                start_button_pressed = 0;
-                main_game();
-			}
-		}
+    //gameplay logic
+    
+    if(lives == 0) {
+        end_game();
 	}
 }
 
-void* coindoor_thread(const char* port) {
-    char read_buffer[9];
-	int cd_text_read = 0;
+void* coindoor_thread(void* arg) {
+	int i;
+	int fd = serialOpen(coin_door_port, 9600);
 	
-	tcgetattr(port, &tty);
-
-	// Configuring USB port - if this doesnt work im going to shoot myself
-	tty.c_cflag &= ~PARENB;
-	tty.c_cflag &= ~CSTOPB;
-	tty.c_cflag |= CS8;
-	tty.c_cflag &= ~CRTSCTS;
-	tty.c_cflag |= CREAD | CLOCAL;
-	tty.c_lflag &= ~ICANON;
-	tty.c_lflag &= ~ECHO;
-	tty.c_lflag &= ~ECHOE;
-	tty.c_lflag &= ~ECHONL;
-	tty.c_lflag &= ~ISIG;
-	tty.c_iflag &= ~(IXON | IXOFF | IXANY);
-	tty.c_iflag &= ~(IGNBRK|BRKINT|PARMRK|ISTRIP|INLCR|IGNCR|ICRNL);
-	tty.c_oflag &= ~OPOST;
-	tty.c_oflag &= ~ONLCR;
-	cfsetispeed(&tty, B9600);
-	cfsetospeed(&tty, B9600);
-
-	tcsetattr(port, TCSANOW, &tty);
-	while (cd_text_read < 9) {
-		cd_text_read += read(port, &read_buffer, sizeof(read_buffer)); //reads initial "COIN_DOOR" text.
+	for (i = 0; i < 9; i++) {
+		serialGetchar(fd);
 	}
+
     while(1) {
 		char read_data[4];
 		int credit = 0;
 		int volume_up = 0;
 		int volume_down = 0;
 		int debug = 0;
-		int read_bytes = 0;
-		while (read_bytes < 4) {
-			read_bytes += read(port, &read_data, sizeof(read_data)); //reads actual data coming in.
+		int ii = 0;
+		
+		if (serialDataAvail(fd) >= 4) {
+			for (ii = 0; ii < 4; ii++) {
+				read_data[i] = serialGetchar(fd);
+			}
 		}
-		credit = atoi(read_data[0]);
-		volume_up = atoi(read_data[1]);
-		volume_down = atoi(read_data[2]);
-		debug = atoi(read_data[3]);
+
+		credit = atoi(&read_data[0]);
+		volume_up = atoi(&read_data[1]);
+		volume_down = atoi(&read_data[2]);
+		debug = atoi(&read_data[3]);
 		
 		if (credit == 1) {
 			pthread_mutex_lock(&deposited_mutex);
@@ -659,13 +636,17 @@ void* coindoor_thread(const char* port) {
 
 // MAIN CODE START.
 int main(int argc, char **argv) {
-    SDL_AudioSpec spec;
+
+	spec.freq = 44100;
+	spec.format = MIX_DEFAULT_FORMAT;
+	spec.channels = NUM_CHANNELS;
+
 	pthread_t thread1;
 	
 	SDL_Init(SDL_INIT_AUDIO | SDL_INIT_VIDEO);
-    Mix_OpenAudio(44100, MIX_DEFAULT_FORMAT, MIX_DEFAULT_CHANNELS, 1024);
+	Mix_OpenAudio(0, &spec);
 	
-	*font = load_font("/home/pinball/Desktop/Pinball/donnell2.bdf");
+	font = load_font("/home/pinball/Desktop/Pinball/donnell2.bdf");
 	
 	matrix_init();
 	load_highscore();
@@ -676,7 +657,7 @@ int main(int argc, char **argv) {
 	check_usb_port("/dev/ttyUSB3");
 
     sleep(1);
-    pthread_create(&thread1, NULL, coindoor_thread, NULL);
+    pthread_create(&thread1, NULL, coindoor_thread, (void*)coin_door_port);
     sleep(1);
 	
 	gif_display_music("/home/pinball/Desktop/Pinball/startup/", 18, 0, "startup.wav"); // need to replace 18 with the correct frame count
