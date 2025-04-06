@@ -10,13 +10,14 @@ char serial_data = 0; // char for storing read serial data.
 uint8_t breathing_effect = 0;
 bool breathing_direction = true; // true = up, false = down
 byte led_code[13]; // array to hold 1 byte chunks of data * 12 shift registers + 1 byte for power FET control
+byte data;
 
 void setup() {
   pinMode(5, OUTPUT); //PD5 - register clock pin (latch)
   pinMode(4, OUTPUT); //PD4 - shift register clock pin
   pinMode(3, OUTPUT); //PD3 - clear registers pin (active low)
   pinMode(6, OUTPUT); //PD6 - serial data pin
-  pinMode(9, OUTPUT); //PB1 - LED Power, Active High (can do PWM for dimming)
+  pinMode(9, OUTPUT); //PB1 - LED Power, active low (can do PWM for dimming)
   
   digitalWrite(3, LOW);
   delay(100);
@@ -32,11 +33,12 @@ void loop() {
 
     digitalWrite(5, LOW);
     for(int i = 1; i < 13; i++) {
-      shiftOut(6, 4, LSBFIRST, led_code[i]);
+      data = led_code[i];
+      shiftOut(6, 4, MSBFIRST, data);
     }
     digitalWrite(5, HIGH);
     
-    if(led_code[0] == 0b11111111) {
+    if(led_code[0] == 0xFF) {
       while(1) {
         if(Serial.available() > 0) {
           analogWrite(9, 0);
