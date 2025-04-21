@@ -30,22 +30,26 @@ void setup() {
 void loop() { 
   if(Serial.available() >= 13) {
     Serial.readBytes(led_code, 13);
+    Serial.println("Data Received"); //debug
 
-    digitalWrite(5, LOW);
     for(int i = 1; i < 13; i++) {
       data = led_code[i];
+      digitalWrite(5, LOW);
       shiftOut(6, 4, MSBFIRST, data);
+      digitalWrite(5, HIGH);
+      delay(10); //maybe add a delay?
+      Serial.println(led_code[i]); //debug
     }
-    digitalWrite(5, HIGH);
     
     if(led_code[0] == 0xFF) {
       while(1) {
         if(Serial.available() > 0) {
+          Serial.println("INTERRUPTED"); //debug
           analogWrite(9, 0);
           break;
         }
-
         analogWrite(9, breathing_effect);
+        Serial.println(breathing_effect);
 
         if(breathing_effect > 250) {
           breathing_direction = false; 
@@ -62,6 +66,8 @@ void loop() {
       }
     } else {
       analogWrite(9, led_code[0]);
+      Serial.print("solid brightness:"); //debug
+      Serial.println(led_code[0]); //debug
     }
   }
 }
