@@ -23,7 +23,6 @@ void setup() {
   pinMode(7, INPUT_PULLUP); //PD7
   pinMode(8, INPUT_PULLUP); //PB0
   pinMode(9, INPUT_PULLUP); //PB1
-  pinMode(10, INPUT_PULLUP); //PB2
 
   Wire.begin(0x01);
   Wire.onRequest(send);
@@ -38,23 +37,28 @@ void loop() {
   br5 = digitalRead(7);
   br6 = digitalRead(8);
   br7 = digitalRead(9);
-  br8 = digitalRead(10);
+  switches = (0 << 7) | (br7 << 6) | (br6 << 5) | (br5 << 4) | (br4 << 3) | (br3 << 2) | (br2 << 1) | (br1 << 0);
   delay(1000);
 }
 
 void send() {
-  switches = (br8 << 7) | (br7 << 6) | (br6 << 5) | (br5 << 4) | (br4 << 3) | (br3 << 2) | (br2 << 1) | (br1 << 0);
   Wire.write(switches);
 }
 
 void receive() {
   while(Wire.available()) {
     received_data = Wire.read();
-    if((received_data - '0' == 1) && (switches = 0)) {
-      digitalWrite(2, 1);
-      delay(1);
-      digitalWrite(2, 0);
-      received_data = 0;
+    if((received_data == 0x11) && (switches == 0)) { //ball detect
+      digitalWrite(2, HIGH);
+      delay(10);
+      digitalWrite(2, LOW);
+      received_data = 0x00;
+    }
+	if((received_data == 0x22) && (switches == 0)) { //ball jam
+      digitalWrite(2, HIGH);
+      delay(10);
+      digitalWrite(2, LOW);
+      received_data = 0x00;
     }
   }
 }
