@@ -13,17 +13,26 @@
 int score_bumper1 = 0;
 int score_bumper2 = 0;
 int score_bumper3 = 0;
+long score = 0;
+
+bool bumper1_last_state = 0;
+bool bumper2_last_state = 0;
+bool bumper3_last_state = 0;
 
 void setup() {
   pinMode(2, OUTPUT); //PD2
   pinMode(3, OUTPUT); //PD3
   pinMode(4, OUTPUT); //PD4
-  pinMode(5, INPUT); //PD5
-  pinMode(6, INPUT); //PD6
-  pinMode(7, INPUT); //PD7
+  pinMode(5, INPUT_PULLUP); //PD5
+  pinMode(6, INPUT_PULLUP); //PD6
+  pinMode(7, INPUT_PULLUP); //PD7
   pinMode(8, OUTPUT); //PB0
   pinMode(9, OUTPUT); //PB1
   pinMode(10, OUTPUT); //PB2
+
+  digitalWrite(2, LOW);
+  digitalWrite(3, LOW);
+  digitalWrite(4, LOW);
 
   Wire.begin(0x03);
   Wire.onRequest(send);
@@ -35,34 +44,50 @@ void loop() {
   bool bumper2_switch = digitalRead(6);
   bool bumper3_switch = digitalRead(7);
 
-  if(bumper1_switch == 1) {
-    digitalWrite(2, 1);
-    digitalWrite(8, 1);
-    delay(1);
-    digitalWrite(2, 0);
-    delay(20);
-    digitalWrite(8, 0);
-    score_bumper1 = 1;
+  if(bumper1_switch == 0) {
+    digitalWrite(8, HIGH);
+	  digitalWrite(2, HIGH);
+    delay(10);
+    digitalWrite(2, LOW);
+    delay(50);
+    digitalWrite(8, LOW);
   }
-  if(bumper2_switch == 1) {
-    digitalWrite(3, 1);
-    digitalWrite(9, 1);
-    delay(1);
-    digitalWrite(3, 0);
-    delay(20);
-    digitalWrite(9, 0);
-    score_bumper2 = 1;
+  if(bumper2_switch == 0) {
+    digitalWrite(9, HIGH);
+	  digitalWrite(3, HIGH);
+    delay(10);
+    digitalWrite(3, LOW);
+    delay(50);
+    digitalWrite(9, LOW);
   }
-  if(bumper3_switch == 1) {
-    digitalWrite(4, 1);
-    digitalWrite(10, 1);
-    delay(1);
-    digitalWrite(4, 0);
-    delay(20);
-    digitalWrite(10, 0);
-    score_bumper3 = 1;
+  if(bumper3_switch == 0) {
+    digitalWrite(10, HIGH);
+	  digitalWrite(4, HIGH);
+    delay(10);
+    digitalWrite(4, LOW);
+    delay(50);
+    digitalWrite(10, LOW);
   }
-  delay(100);
+  delay(25);
+
+  if(bumper1_switch != bumper1_last_state) {  
+    bumper1_last_state = bumper1_switch;  
+    if(bumper1_switch == HIGH) {
+		  score += 100;
+	  }
+  }
+  if(bumper2_switch != bumper2_last_state) {  
+    bumper2_last_state = bumper2_switch;  
+    if(bumper2_switch == HIGH) {
+		  score += 100;
+	  }
+  }
+  if(bumper3_switch != bumper3_last_state) {  
+    bumper3_last_state = bumper3_switch;  
+    if(bumper3_switch == HIGH) {
+		  score += 100;
+	  }
+  }
 }
 
 void send() {
@@ -71,6 +96,7 @@ void send() {
   score_bumper2 = 0;
   score_bumper3 = 0;
   Wire.write(score);
+  score = 0;
 }
 
 void receive() {
