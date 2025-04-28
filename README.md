@@ -10,3 +10,8 @@
 **master_controller_program_mcu1.ino** -> Current Arduino code for Master Controller MCU's 1st worker.  
 **master_controller_program_mcu2.ino** -> Current Arduino code for Master Controller MCU's 2nd worker.  
 **master_controller_program_mcu3.ino** -> Current Arduino code for Master Controller MCU's 3rd worker.  
+  
+  
+**CUSTOM FONTS**  
+donnell.ttf -> unused, larger version  
+donnell2.ttf -> used, smaller version, fits better on matrix display.  
